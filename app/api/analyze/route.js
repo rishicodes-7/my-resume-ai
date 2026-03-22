@@ -1,6 +1,41 @@
-export async function POST(req) {
-  const { resume, jobDescription } = await req.json();
+import { NextResponse } from "next/server";
 
+export async function POST(req) {
+  let resumeText = "";
+
+  const contentType = req.headers.get("content-type") || "";
+
+  if (contentType.includes("multipart/form-data")) {
+    const formData = await req.formData();
+    const file = formData.get("file");
+    const jobDescription = formData.get("jobDescription");
+
+    const buffer = Buffer.from(await file.arrayBuffer());
+    
+    // Extract text from PDF buffer
+    const PDFParser = (await import("pdf2json")).default;
+    const pdfParser = new PDFParser();
+    
+    resumeText = await new Promise((resolve, reject) => {
+      pdfParser.on("pdfParser_dataReady", (data) => {
+        const text = data.Pages.flatMap(page =>
+          page.Texts.map(t => decodeURIComponent(t.R[0].T))
+        ).join(" ");
+        resolve(text);
+      });
+      pdfParser.on("pdfParser_dataError", reject);
+      pdfParser.parseBuffer(buffer);
+    });
+
+    return await analyzeResume(resumeText, jobDescription);
+  } else {
+    const { resume, jobDescription } = await req.json();
+    resumeText = resume;
+    return await analyzeResume(resumeText, jobDescription);
+  }
+}
+
+async function analyzeResume(resume, jobDescription) {
   const prompt = `
     You are a resume expert. Analyze this resume vs the job description.
     RESUME: ${resume}
@@ -23,26 +58,28 @@ export async function POST(req) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`
+        Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
       },
       body: JSON.stringify({
         model: "llama-3.3-70b-versatile",
         messages: [{ role: "user", content: prompt }],
-        temperature: 0.7
-      })
+        temperature: 0.7,
+      }),
     }
   );
 
   const data = await response.json();
-  console.log("GROQ RESPONSE:", JSON.stringify(data, null, 2));
 
   if (!data.choices || !data.choices[0]) {
-    return Response.json({ error: "Groq API failed", details: data }, { status: 500 });
+    return NextResponse.json(
+      { error: "Groq API failed", details: data },
+      { status: 500 }
+    );
   }
 
   const text = data.choices[0].message.content;
   const clean = text.replace(/```json|```/g, "").trim();
   const result = JSON.parse(clean);
 
-  return Response.json(result);
+  return NextResponse.json(result);
 }
